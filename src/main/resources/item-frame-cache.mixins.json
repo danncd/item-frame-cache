@@ -1,0 +1,14 @@
+{
+	"required": true,
+	"package": "com.danny.ifc.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"mixins": [
+      "com.danncd.ifc.mixin.ExampleMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}

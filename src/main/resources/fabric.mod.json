@@ -1,0 +1,31 @@
+{
+	"schemaVersion": 1,
+	"id": "itemframecache",
+	"version": "${version}",
+	"name": "Item Frame Cache",
+	"description": "Caches item frames on the client.",
+	"authors": [
+		"danncd (Danny)"
+	],
+	"contact": {},
+	"license": "CC0-1.0",
+	"icon": "assets/item-frame-cache/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.danncd.ifc.ItemFrameCacheClient"
+		]
+	},
+	"mixins": [
+		{
+			"config": "item-frame-cache.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.17.2",
+		"minecraft": "~1.21.8",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
