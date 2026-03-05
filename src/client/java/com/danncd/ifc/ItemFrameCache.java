@@ -18,15 +18,18 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class ItemFrameCache {
 
+    // Used Map to store the data
+    // LIVE_CACHE holds the 3D objects
+    // DISK_CACHE holds the raw data
     public static final Map<String, Map<ChunkPos, Map<BlockPos, ItemFrame>>> LIVE_CACHE = new ConcurrentHashMap<>();
     public static final Map<String, Map<ChunkPos, Map<BlockPos, CompoundTag>>> DISK_CACHE = new ConcurrentHashMap<>();
-
     public static final Map<BlockPos, ItemFrame> LOADED_REAL_FRAMES = new ConcurrentHashMap<>();
 
+    // addFrame() saves a frame to RAM
     public static void addFrame(String worldKey, BlockPos pos, ItemFrame frame) {
         ChunkPos chunkPos = new ChunkPos(pos);
 
-        LIVE_CACHE.computeIfAbsent(worldKey, k -> new ConcurrentHashMap<>())
+        LIVE_CACHE.computeIfAbsent(worldKey, k-> new ConcurrentHashMap<>())
                 .computeIfAbsent(chunkPos, k -> new ConcurrentHashMap<>())
                 .put(pos, frame);
 
@@ -43,14 +46,15 @@ public class ItemFrameCache {
             Tag itemTag = ItemStack.CODEC.encodeStart(ops, frame.getItem()).getOrThrow();
             tag.put("item", itemTag);
         } catch (Exception e) {
-            System.err.println("Failed to serialize item frame at " + pos);
+            System.err.println("[Item Frame Cache] Failed to serialize item frame at " + pos);
         }
 
-        DISK_CACHE.computeIfAbsent(worldKey, k -> new ConcurrentHashMap<>())
+        DISK_CACHE.computeIfAbsent(worldKey, k-> new ConcurrentHashMap<>())
                 .computeIfAbsent(chunkPos, k -> new ConcurrentHashMap<>())
                 .put(pos, tag);
     }
 
+    // getOrBuildframe() returns a frame if found, if not, builds, saves, and returns a frame
     public static ItemFrame getOrBuildFrame(String worldKey, BlockPos pos, Minecraft mc) {
         ChunkPos chunkPos = new ChunkPos(pos);
 
@@ -66,6 +70,7 @@ public class ItemFrameCache {
         if (diskWorld != null && diskWorld.containsKey(chunkPos) && mc.level != null) {
             var diskChunk = diskWorld.get(chunkPos);
             if (diskChunk != null && diskChunk.containsKey(pos)) {
+
                 CompoundTag tag = diskChunk.get(pos);
 
                 byte faceByte = tag.getByte("face").orElse((byte) 0);
@@ -73,6 +78,7 @@ public class ItemFrameCache {
                 boolean isGlow = tag.getBoolean("glow").orElse(false);
 
                 ItemFrame dummy;
+
                 if (isGlow) {
                     dummy = new GlowItemFrame(mc.level, pos, dir);
                 } else {
@@ -80,6 +86,7 @@ public class ItemFrameCache {
                 }
 
                 Tag itemTag = tag.get("item");
+
                 if (itemTag != null) {
                     try {
                         RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, mc.level.registryAccess());
@@ -92,12 +99,9 @@ public class ItemFrameCache {
                     dummy.setItem(ItemStack.EMPTY);
                 }
 
-                dummy.setRotation(tag.getByte("rot").orElse((byte) 0));
-
-                LIVE_CACHE.computeIfAbsent(worldKey, k -> new ConcurrentHashMap<>())
+                LIVE_CACHE.computeIfAbsent(worldKey, k-> new ConcurrentHashMap<>())
                         .computeIfAbsent(chunkPos, k -> new ConcurrentHashMap<>())
                         .put(pos, dummy);
-
                 return dummy;
             }
         }
@@ -108,13 +112,13 @@ public class ItemFrameCache {
         return FabricLoader.getInstance().getConfigDir().resolve("itemframecache.dat");
     }
 
+    // saveToDisk() saves all frames to file
     public static void saveToDisk() {
         CompoundTag root = new CompoundTag();
         for (Map.Entry<String, Map<ChunkPos, Map<BlockPos, CompoundTag>>> worldEntry : DISK_CACHE.entrySet()) {
-
             ListTag list = new ListTag();
             for (Map<BlockPos, CompoundTag> chunkMap : worldEntry.getValue().values()) {
-                chunkMap.values().forEach(list::add);
+                list.addAll(chunkMap.values());
             }
             root.put(worldEntry.getKey(), list);
         }
@@ -122,19 +126,19 @@ public class ItemFrameCache {
             NbtIo.writeCompressed(root, getSaveFile());
             System.err.println("[Item Frame Cache] Successfully saved frames to disk.");
         } catch (Exception e) {
-            System.err.println("[Item Frame Cache] Failed to save to disk!");
-            e.printStackTrace();
+            System.err.println("[Item Frame Cache] Failed to save to disk.");
         }
     }
 
+    // loadFromDisk() loads all item frames stored in disk to the Map
     public static void loadFromDisk() {
         File file = getSaveFile().toFile();
         if (!file.exists()) return;
 
         try {
-            CompoundTag root = NbtIo.readCompressed(file.toPath(), net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+            CompoundTag root = NbtIo.readCompressed(file.toPath(),
+                    net.minecraft.nbt.NbtAccounter.unlimitedHeap());
             for (String worldKey : root.keySet()) {
-
                 Map<ChunkPos, Map<BlockPos, CompoundTag>> worldMap = new ConcurrentHashMap<>();
                 Tag listTag = root.get(worldKey);
 
@@ -154,7 +158,7 @@ public class ItemFrameCache {
                 }
                 DISK_CACHE.put(worldKey, worldMap);
             }
-            System.err.println("[Item Frame Cache] Loaded frames from disk (Chunk Partitioned).");
+            System.err.println("[Item Frame Cache] Loaded frames from disk.");
         } catch (Exception e) {
             System.err.println("[Item Frame Cache] Failed to load from disk!");
             e.printStackTrace();
@@ -171,5 +175,7 @@ public class ItemFrameCache {
             var diskChunk = DISK_CACHE.get(worldKey).get(chunkPos);
             if (diskChunk != null) diskChunk.remove(pos);
         }
+
     }
+
 }

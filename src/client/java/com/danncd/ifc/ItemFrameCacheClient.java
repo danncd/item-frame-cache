@@ -1,5 +1,4 @@
 package com.danncd.ifc;
-
 import com.mojang.blaze3d.vertex.PoseStack;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
@@ -19,181 +18,190 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ItemFrameCacheClient implements ClientModInitializer {
+    private static final Map<BlockPos, ItemFrame> TRACKED_FRAMES = new ConcurrentHashMap<>();
 
-	private static final Map<BlockPos, ItemFrame> TRACKED_FRAMES = new ConcurrentHashMap<>();
+    private String getCurrentWorldKey(Minecraft mc) {
+        if (mc.level == null) return "unknown";
+        String server = mc.getCurrentServer() != null ? mc.getCurrentServer().ip : "singleplayer";
+        String dimension = mc.level.dimension().location().toString();
+        return server + "_" + dimension;
+    }
 
-	private String getCurrentWorldKey(Minecraft mc) {
-		if (mc.level == null) return "unknown";
-		String server = mc.getCurrentServer() != null ? mc.getCurrentServer().ip : "singleplayer";
-		String dimension = mc.level.dimension().location().toString();
-		return server + "_" + dimension;
-	}
+    @Override
+    public void onInitializeClient() {
+        System.err.println("[Item Frame Cache] Mod successfully loaded!");
 
-	@Override
-	public void onInitializeClient() {
-		System.err.println("[Item Frame Cache] Mod successfully loaded :)");
+        ItemFrameCache.loadFromDisk();
 
-		ItemFrameCache.loadFromDisk();
+        // Save data when client disconnects
+        ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
+            ItemFrameCache.saveToDisk();
+        });
 
-		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
-			ItemFrameCache.saveToDisk();
-		});
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            ItemFrameCache.saveToDisk();
+            ItemFrameCache.LOADED_REAL_FRAMES.clear();
+            TRACKED_FRAMES.clear();
+            ItemFrameCache.LIVE_CACHE.clear();
+        });
 
-		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
-			ItemFrameCache.saveToDisk();
-			ItemFrameCache.LOADED_REAL_FRAMES.clear();
-			TRACKED_FRAMES.clear();
-			ItemFrameCache.LIVE_CACHE.clear();
-		});
+        // Build frames on chunk loading
+        ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null) return;
 
-		ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
-			Minecraft mc = Minecraft.getInstance();
-			if (mc.level == null) return;
+            String worldKey = getCurrentWorldKey(mc);
+            var diskWorld = ItemFrameCache.DISK_CACHE.get(worldKey);
 
-			String worldKey = getCurrentWorldKey(mc);
-			var diskWorld = ItemFrameCache.DISK_CACHE.get(worldKey);
+            if (diskWorld != null) {
+                var chunkMap = diskWorld.get(chunk.getPos());
+                if (chunkMap != null) {
+                    for (BlockPos pos : chunkMap.keySet()) {
+                        ItemFrameCache.getOrBuildFrame(worldKey, pos, mc);
+                    }
+                }
+            }
+        });
 
-			if (diskWorld != null) {
-				var chunkMap = diskWorld.get(chunk.getPos());
-				if (chunkMap != null) {
-					for (BlockPos pos : chunkMap.keySet()) {
-						ItemFrameCache.getOrBuildFrame(worldKey, pos, mc);
-					}
-				}
-			}
-		});
+        ClientEntityEvents.ENTITY_UNLOAD.register((entity, world) -> {
+            if (entity == Minecraft.getInstance().player) {
+                ItemFrameCache.LOADED_REAL_FRAMES.clear();
+                TRACKED_FRAMES.clear();
+            }
+        });
 
-		ClientEntityEvents.ENTITY_UNLOAD.register((entity, world) -> {
-			if (entity == Minecraft.getInstance().player) {
-				ItemFrameCache.LOADED_REAL_FRAMES.clear();
-				TRACKED_FRAMES.clear();
-			}
-		});
+        ClientEntityEvents.ENTITY_UNLOAD.register((entity, world) -> {
+            if (entity instanceof ItemFrame frame) {
+                ItemFrameCache.LOADED_REAL_FRAMES.remove(frame.blockPosition());
+                TRACKED_FRAMES.remove(frame.blockPosition());
 
-		ClientEntityEvents.ENTITY_LOAD.register((entity, world) -> {
-			if (entity instanceof ItemFrame frame) {
-				ItemFrameCache.LOADED_REAL_FRAMES.put(frame.blockPosition(), frame);
-				TRACKED_FRAMES.put(frame.blockPosition(), frame);
+                String worldKey = getCurrentWorldKey(Minecraft.getInstance());
 
-				if (!frame.getItem().isEmpty()) {
-					String worldKey = getCurrentWorldKey(Minecraft.getInstance());
-					ItemFrameCache.addFrame(worldKey, frame.blockPosition(), frame);
-				}
-			}
-		});
+                if (frame.getItem().isEmpty()) {
+                    ItemFrameCache.removeFrame(worldKey, frame.blockPosition());
+                } else {
+                    ItemFrameCache.addFrame(worldKey, frame.blockPosition(), frame);
+                }
+            }
+        });
 
-		ClientEntityEvents.ENTITY_UNLOAD.register((entity, world) -> {
-			if (entity instanceof ItemFrame frame) {
-				ItemFrameCache.LOADED_REAL_FRAMES.remove(frame.blockPosition());
-				TRACKED_FRAMES.remove(frame.blockPosition());
+        ClientEntityEvents.ENTITY_LOAD.register((entity, world) -> {
+            if (entity instanceof ItemFrame frame) {
+                ItemFrameCache.LOADED_REAL_FRAMES.put(frame.blockPosition(), frame);
+                TRACKED_FRAMES.put(frame.blockPosition(), frame);
 
-				String worldKey = getCurrentWorldKey(Minecraft.getInstance());
+                if (!frame.getItem().isEmpty()) {
+                    String worldKey = getCurrentWorldKey(Minecraft.getInstance());
+                    ItemFrameCache.addFrame(worldKey, frame.blockPosition(), frame);
+                }
+            }
+        });
 
-				if (frame.getItem().isEmpty()) {
-					ItemFrameCache.removeFrame(worldKey, frame.blockPosition());
-				} else {
-					ItemFrameCache.addFrame(worldKey, frame.blockPosition(), frame);
-				}
-			}
-		});
+        // Ghost frames remains for a bit to prevent flickering
+        WorldRenderEvents.BEFORE_ENTITIES.register(context -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null || mc.player == null) return;
 
-		WorldRenderEvents.BEFORE_ENTITIES.register(context -> {
-			Minecraft mc = Minecraft.getInstance();
-			if (mc.level == null || mc.player == null) return;
-			String worldKey = getCurrentWorldKey(mc);
-			var diskWorld = ItemFrameCache.DISK_CACHE.get(worldKey);
+            String worldKey = getCurrentWorldKey(mc);
+            var diskWorld = ItemFrameCache.DISK_CACHE.get(worldKey);
 
-			for (ItemFrame frame : TRACKED_FRAMES.values()) {
-				boolean hasCache = false;
-				if (diskWorld != null) {
-					ChunkPos cPos = new ChunkPos(frame.blockPosition());
-					var chunkMap = diskWorld.get(cPos);
-					if (chunkMap != null && chunkMap.containsKey(frame.blockPosition())) {
-						hasCache = true;
-					}
-				}
+            for (ItemFrame frame : TRACKED_FRAMES.values()) {
+                boolean hasCache = false;
+                if (diskWorld != null) {
+                    ChunkPos chunkPos = new ChunkPos(frame.blockPosition());
+                    var chunkMap = diskWorld.get(chunkPos);
+                    if (chunkMap != null && chunkMap.containsKey(frame.blockPosition())) {
+                        hasCache = true;
+                    }
+                }
 
-				if (hasCache && frame.tickCount < 40) {
-					frame.setInvisible(true);
-				} else {
-					frame.setInvisible(false);
-					if (frame.getItem().isEmpty() && frame.tickCount >= 40 && hasCache) {
-						ItemFrameCache.removeFrame(worldKey, frame.blockPosition());
-					}
-				}
-			}
-		});
+                if (hasCache && frame.tickCount < 5) {
+                    frame.setInvisible(true);
+                } else {
+                    frame.setInvisible(false);
+                    if (frame.getItem().isEmpty() && frame.tickCount >= 5 && hasCache) {
+                        ItemFrameCache.removeFrame(worldKey, frame.blockPosition());
+                    }
+                }
+            }
+        });
 
-		WorldRenderEvents.AFTER_ENTITIES.register(context -> {
-			Minecraft mc = Minecraft.getInstance();
-			if (mc.level == null || mc.player == null) return;
+        WorldRenderEvents.AFTER_ENTITIES.register(context -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null || mc.player == null) return;
 
-			String worldKey = getCurrentWorldKey(mc);
-			var diskWorld = ItemFrameCache.DISK_CACHE.get(worldKey);
+            String worldKey = getCurrentWorldKey(mc);
+            var diskWorld = ItemFrameCache.DISK_CACHE.get(worldKey);
 
-			if (diskWorld == null || diskWorld.isEmpty()) return;
+            if (diskWorld == null || diskWorld.isEmpty()) return;
 
-			PoseStack poseStack = context.matrixStack();
-			Vec3 camera = context.camera().getPosition();
-			MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
-			var frustum = context.frustum();
+            PoseStack poseStack = context.matrixStack();
+            Vec3 camera = context.camera().getPosition();
+            MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
+            var frustum = context.frustum();
 
-			ChunkPos playerChunk = mc.player.chunkPosition();
+            ChunkPos playerChunk = mc.player.chunkPosition();
 
-			double entityScale = mc.options.entityDistanceScaling().get();
-			double maxRenderDist = 64.0 * entityScale;
-			double maxRenderDistSqr = maxRenderDist * maxRenderDist;
+            double entityScale = mc.options.entityDistanceScaling().get();
+            double maxRenderDist = 64.0 * entityScale;
+            double maxRenderDistSqr = maxRenderDist * maxRenderDist;
 
-			int chunkRadius = (int) Math.ceil(maxRenderDist / 16.0);
+            int chunkRadius = (int) Math.ceil(maxRenderDist / 16.0);
 
-			for (int cx = playerChunk.x - chunkRadius; cx <= playerChunk.x + chunkRadius; cx++) {
-				for (int cz = playerChunk.z - chunkRadius; cz <= playerChunk.z + chunkRadius; cz++) {
+            for (int cx = playerChunk.x - chunkRadius; cx <= playerChunk.x + chunkRadius; cx++) {
+                for (int cz = playerChunk.z - chunkRadius; cz <= playerChunk.z + chunkRadius; cz++) {
 
-					ChunkPos currentChunk = new ChunkPos(cx, cz);
-					var chunkMap = diskWorld.get(currentChunk);
+                    ChunkPos currentChunk = new ChunkPos(cx, cz);
+                    var chunkMap = diskWorld.get(currentChunk);
 
-					if (chunkMap == null || chunkMap.isEmpty()) continue;
+                    if (chunkMap == null || chunkMap.isEmpty()) continue;
 
-					for (BlockPos pos : chunkMap.keySet()) {
+                    for (BlockPos pos : chunkMap.keySet()) {
 
-						if (pos.distToCenterSqr(camera) > maxRenderDistSqr) continue;
+                        if (pos.distToCenterSqr(camera) > maxRenderDistSqr) continue;
 
-						if (frustum != null) {
-							net.minecraft.world.phys.AABB boundingBox = new net.minecraft.world.phys.AABB(pos);
-							if (!frustum.isVisible(boundingBox)) continue;
-						}
+                        if (frustum != null) {
+                            net.minecraft.world.phys.AABB boundingBox = new net.minecraft.world.phys.AABB(pos);
+                            if (!frustum.isVisible(boundingBox)) continue;
+                        }
 
-						ItemFrame realFrame = TRACKED_FRAMES.get(pos);
-						if (realFrame != null && realFrame.tickCount >= 40) continue;
+                        ItemFrame realFrame = TRACKED_FRAMES.get(pos);
 
-						ItemFrame dummy = ItemFrameCache.getOrBuildFrame(worldKey, pos, mc);
-						if (dummy == null) continue;
+                        if (realFrame == null && pos.distToCenterSqr(camera) < 25.0 && mc.player.tickCount > 100) {
+                            ItemFrameCache.removeFrame(worldKey, pos);
+                            continue;
+                        }
 
-						if (dummy.getItem().isEmpty()) continue;
+                        if (realFrame != null && realFrame.tickCount >= 5) continue;
 
-						poseStack.pushPose();
-						poseStack.translate(dummy.getX() - camera.x, dummy.getY() - camera.y, dummy.getZ() - camera.z);
+                        ItemFrame dummy = ItemFrameCache.getOrBuildFrame(worldKey, pos, mc);
+                        if (dummy == null) continue;
 
-						@SuppressWarnings({"rawtypes", "unchecked"})
-						var renderer = (net.minecraft.client.renderer.entity.EntityRenderer)
-								mc.getEntityRenderDispatcher().getRenderer(dummy);
+                        if (dummy.getItem().isEmpty()) continue;
 
-						int blockLight = mc.level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, pos);
-						int skyLight = mc.level.getBrightness(net.minecraft.world.level.LightLayer.SKY, pos);
-						int light = LightTexture.pack(blockLight, skyLight);
+                        poseStack.pushPose();
+                        poseStack.translate(dummy.getX() - camera.x, dummy.getY() - camera.y, dummy.getZ() - camera.z);
 
-						var state = renderer.createRenderState();
-						renderer.extractRenderState(dummy, state, 0.0F);
+                        @SuppressWarnings({"rawtypes", "unchecked"})
+                        var renderer = (net.minecraft.client.renderer.entity.EntityRenderer)
+                                mc.getEntityRenderDispatcher().getRenderer(dummy);
 
-						Vec3 offset = renderer.getRenderOffset(state);
-						poseStack.translate(offset.x(), offset.y(), offset.z());
+                        int blockLight = mc.level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, pos);
+                        int skyLight = mc.level.getBrightness(net.minecraft.world.level.LightLayer.SKY, pos);
+                        int light = LightTexture.pack(blockLight, skyLight);
 
-						renderer.render(state, poseStack, bufferSource, light);
-						poseStack.popPose();
-					}
-				}
-			}
-			bufferSource.endBatch();
-		});
-	}
+                        var state = renderer.createRenderState();
+                        renderer.extractRenderState(dummy, state, 0.0F);
+
+                        Vec3 offset = renderer.getRenderOffset(state);
+                        poseStack.translate(offset.x(), offset.y(), offset.z());
+
+                        renderer.render(state, poseStack, bufferSource, light);
+                        poseStack.popPose();
+                    }
+                }
+            }
+            bufferSource.endBatch();
+        });
+    }
 }
